@@ -24,12 +24,18 @@ struct PlayerView: View {
     @AppStorage("arcEdgeOffset") private var arcEdgeOffset = 55.0
     @AppStorage("arcCenterY") private var arcCenterY = 0.5
     @AppStorage("arcRadius") private var arcRadius = 220.0
+    // 每個物件的個別位移 / 縮放
+    @AppStorage("arcObjectLayout") private var arcLayoutRaw = "{}"
 
     // 編輯模式
     @State private var editingArc = false
     @State private var dragStartEdge: Double?
     @State private var dragStartCenterY: Double?
     @State private var magStart: Double?
+    @State private var editSelection: String?     // "arc" / "fn:<raw>" / nil
+    @State private var startAdj = LayoutAdjust()
+    @State private var dragActive = false
+    @State private var dragTargetIsObject = false
 
     @State private var controlsVisible = false          // 平時隱藏
     @State private var isLocked = false
@@ -75,6 +81,12 @@ struct PlayerView: View {
         GeometryReader { geo in
             let geom = makeGeometry(size: geo.size, count: functions.count)
             let subGeom = makeGeometry(size: geo.size, count: submenuToggleList.count, extra: 86)
+            let placement = ArcPlacement(
+                firstCenter: { adjustedCenter(geom.center($0), firstID($0)) },
+                firstSize: { 50 * CGFloat(adjust(firstID($0)).scale) },
+                secondCenter: { adjustedCenter(subGeom.center($0), toggleID($0)) },
+                secondSize: { 46 * CGFloat(adjust(toggleID($0)).scale) }
+            )
 
             ZStack {
                 Color.black.ignoresSafeArea()
@@ -86,10 +98,10 @@ struct PlayerView: View {
                     .clipped()
 
                 if editingArc {
-                    editOverlay(geom)
+                    editOverlay(geom, placement)
                 } else {
                     PlayerGestureView(
-                        circles: hitCircles(geom: geom, subGeom: subGeom),
+                        circles: hitCircles(placement),
                         anchor: geom.anchor,
                         regionRadius: geom.regionRadius,
                         controlsVisible: controlsVisible,
@@ -105,11 +117,11 @@ struct PlayerView: View {
                             title: item.title,
                             geometry: geom,
                             functions: functions,
+                            placement: placement,
                             orientationMode: orientationMode,
                             isZoomed: zoomScale > 1,
                             activeRef: activeRef,
                             submenuToggles: openSubmenu != nil ? submenuToggleList : [],
-                            submenuGeometry: openSubmenu != nil ? subGeom : nil,
                             toggleOn: toggleOn,
                             onClose: close,
                             onMore: { showMore = true }
@@ -163,29 +175,63 @@ struct PlayerView: View {
                     extraRadius: extra)
     }
 
-    // MARK: - 編輯半圓模式
+    // MARK: - 每物件位移 / 縮放
+
+    private var objectLayout: [String: LayoutAdjust] { LayoutStore.decode(arcLayoutRaw) }
+    private func adjust(_ id: String) -> LayoutAdjust { objectLayout[id] ?? LayoutAdjust() }
+    private func setAdjust(_ id: String, _ a: LayoutAdjust) {
+        var d = objectLayout; d[id] = a; arcLayoutRaw = LayoutStore.encode(d)
+    }
+    private func firstID(_ i: Int) -> String { "fn:\(functions[i].rawValue)" }
+    private func toggleID(_ i: Int) -> String { "tg:\(submenuToggleList[i].rawValue)" }
+
+    /// 套用個別位移（dx 以右手為基準，左手鏡射）。
+    private func adjustedCenter(_ base: CGPoint, _ id: String) -> CGPoint {
+        let a = adjust(id)
+        let sign: CGFloat = isLeftHanded ? -1 : 1
+        return CGPoint(x: base.x + sign * CGFloat(a.dx), y: base.y + CGFloat(a.dy))
+    }
+
+    private func iconFor(_ f: PlayerFunction) -> String {
+        switch f {
+        case .playPause:   return controller.isPlaying ? "pause.fill" : "play.fill"
+        case .orientation: return orientationMode.icon
+        case .zoom:        return zoomScale > 1 ? "minus.magnifyingglass" : "plus.magnifyingglass"
+        default:           return f.icon
+        }
+    }
+
+    // MARK: - 編輯模式
+
+    private var isObjectSelected: Bool { editSelection != nil && editSelection != "arc" }
+
+    private var selectionName: String {
+        guard let sel = editSelection, sel != "arc" else { return "整個半圓" }
+        let raw = String(sel.dropFirst(3))
+        return PlayerFunction(rawValue: raw)?.title ?? "物件"
+    }
 
     @ViewBuilder
-    private func editOverlay(_ geom: ArcGeometry) -> some View {
+    private func editOverlay(_ geom: ArcGeometry, _ placement: ArcPlacement) -> some View {
         ZStack {
             Color.black.opacity(0.45).ignoresSafeArea()
 
-            ArcPreviewView(geometry: geom, functions: functions)
+            ArcPreviewView(geometry: geom, functions: functions, placement: placement,
+                           selectedId: editSelection, iconFor: iconFor)
 
-            // 手勢接收層（單指拖動移動、雙指縮放）
             Color.clear
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
-                .gesture(editDrag)
+                .gesture(editDrag(placement))
                 .simultaneousGesture(editMagnify)
 
             VStack {
                 HStack(spacing: 12) {
-                    Text("編輯半圓").font(.headline)
+                    Text("編輯").font(.headline)
                     Spacer()
-                    Button("重設") { resetArc() }
+                    Button("重設") { resetLayout() }
                         .buttonStyle(.bordered)
-                    Button("完成") { withAnimation { editingArc = false } }
+                    Button("完成") { withAnimation { editingArc = false }; editSelection = nil }
                         .buttonStyle(.borderedProminent)
                 }
                 .padding()
@@ -194,62 +240,106 @@ struct PlayerView: View {
 
                 Spacer()
 
-                Text("單指拖動移動圓心・雙指縮放大小")
-                    .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.vertical, 8).padding(.horizontal, 14)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.bottom, 36)
+                VStack(spacing: 4) {
+                    Text("已選：\(selectionName)").font(.subheadline.weight(.medium))
+                    Text(isObjectSelected
+                         ? "拖動移動這顆・雙指縮放這顆大小"
+                         : "點一顆小圓選取它・拖空白移動整個半圓・雙指縮放整體")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.8))
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.vertical, 10).padding(.horizontal, 16)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .padding(.bottom, 36)
             }
+            .foregroundStyle(.white)
         }
         .transition(.opacity)
     }
 
-    private var editDrag: some Gesture {
-        DragGesture()
+    private func editDrag(_ placement: ArcPlacement) -> some Gesture {
+        DragGesture(minimumDistance: 0)
             .onChanged { v in
-                if dragStartEdge == nil {
-                    dragStartEdge = arcEdgeOffset
-                    dragStartCenterY = arcCenterY
+                if !dragActive {
+                    dragActive = true
+                    if let i = firstHitIndex(v.startLocation, placement) {
+                        editSelection = firstID(i)
+                        dragTargetIsObject = true
+                        startAdj = adjust(firstID(i))
+                    } else {
+                        editSelection = "arc"
+                        dragTargetIsObject = false
+                        dragStartEdge = arcEdgeOffset
+                        dragStartCenterY = arcCenterY
+                    }
                 }
-                // 往螢幕中央拖 → 圓心更靠內（edgeOffset 變小）；左右手方向相反
-                let sign: Double = isLeftHanded ? -1 : 1
-                arcEdgeOffset = min(max(dragStartEdge! + sign * Double(v.translation.width), -220), 400)
-                let h = max(Double(playerSize.height), 1)
-                arcCenterY = min(max(dragStartCenterY! + Double(v.translation.height) / h, 0.12), 0.88)
+                if dragTargetIsObject, let id = editSelection {
+                    let sign: Double = isLeftHanded ? -1 : 1
+                    var a = startAdj
+                    a.dx = startAdj.dx + sign * Double(v.translation.width)
+                    a.dy = startAdj.dy + Double(v.translation.height)
+                    setAdjust(id, a)
+                } else if let e = dragStartEdge, let cy = dragStartCenterY {
+                    let sign: Double = isLeftHanded ? -1 : 1
+                    arcEdgeOffset = min(max(e + sign * Double(v.translation.width), -220), 400)
+                    let h = max(Double(playerSize.height), 1)
+                    arcCenterY = min(max(cy + Double(v.translation.height) / h, 0.12), 0.88)
+                }
             }
-            .onEnded { _ in dragStartEdge = nil; dragStartCenterY = nil }
+            .onEnded { _ in
+                dragActive = false; dragStartEdge = nil; dragStartCenterY = nil
+            }
     }
 
     private var editMagnify: some Gesture {
         MagnificationGesture()
             .onChanged { scale in
-                if magStart == nil { magStart = arcRadius }
-                arcRadius = min(max(magStart! * Double(scale), 90), 430)
+                if magStart == nil {
+                    magStart = isObjectSelected ? adjust(editSelection!).scale : arcRadius
+                }
+                if isObjectSelected, let id = editSelection {
+                    var a = adjust(id)
+                    a.scale = min(max(magStart! * Double(scale), 0.4), 3.0)
+                    setAdjust(id, a)
+                } else {
+                    arcRadius = min(max(magStart! * Double(scale), 90), 430)
+                }
             }
             .onEnded { _ in magStart = nil }
     }
 
-    private func resetArc() {
+    private func firstHitIndex(_ p: CGPoint, _ placement: ArcPlacement) -> Int? {
+        for i in functions.indices {
+            let c = placement.firstCenter(i)
+            let r = max(28, placement.firstSize(i) / 2 + 12)
+            if hypot(p.x - c.x, p.y - c.y) <= r { return i }
+        }
+        return nil
+    }
+
+    private func resetLayout() {
         withAnimation {
-            arcEdgeOffset = 55
-            arcCenterY = 0.5
-            arcRadius = 220
+            arcEdgeOffset = 55; arcCenterY = 0.5; arcRadius = 220
+            arcLayoutRaw = "{}"
+            editSelection = nil
         }
         Haptics.selection()
     }
 
     // MARK: - 命中圓
 
-    private func hitCircles(geom: ArcGeometry, subGeom: ArcGeometry) -> [PlayerGestureView.HitCircle] {
+    private func hitCircles(_ placement: ArcPlacement) -> [PlayerGestureView.HitCircle] {
         var result = functions.indices.map { i in
             PlayerGestureView.HitCircle(ref: CircleRef(layer: 0, index: i),
-                                        center: geom.center(i), radius: 36)
+                                        center: placement.firstCenter(i),
+                                        radius: max(28, placement.firstSize(i) / 2 + 12))
         }
         if openSubmenu != nil {
             result += submenuToggleList.indices.map { i in
                 PlayerGestureView.HitCircle(ref: CircleRef(layer: 1, index: i),
-                                            center: subGeom.center(i), radius: 32)
+                                            center: placement.secondCenter(i),
+                                            radius: max(26, placement.secondSize(i) / 2 + 10))
             }
         }
         return result

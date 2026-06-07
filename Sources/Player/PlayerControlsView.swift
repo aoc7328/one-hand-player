@@ -9,13 +9,13 @@ struct PlayerControlsView: View {
     let title: String
     let geometry: ArcGeometry
     let functions: [PlayerFunction]
+    let placement: ArcPlacement
     let orientationMode: ScreenOrientationMode
     let isZoomed: Bool
     let activeRef: CircleRef?
 
     // 第二層
     let submenuToggles: [QuickToggle]
-    let submenuGeometry: ArcGeometry?
     let toggleOn: (QuickToggle) -> Bool
 
     let onClose: () -> Void
@@ -23,8 +23,6 @@ struct PlayerControlsView: View {
 
     @State private var scrubValue: Double = 0
     @State private var isScrubbing = false
-
-    private let circleSize: CGFloat = 50
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -114,32 +112,34 @@ struct PlayerControlsView: View {
             // 第一層功能小圓
             ForEach(Array(functions.enumerated()), id: \.offset) { index, function in
                 firstLayerCircle(function,
+                                 size: placement.firstSize(index),
                                  isActive: activeRef == CircleRef(layer: 0, index: index))
-                    .position(geometry.center(index))
+                    .position(placement.firstCenter(index))
             }
 
             // 第二層開關
-            if let sg = submenuGeometry, !submenuToggles.isEmpty {
+            if !submenuToggles.isEmpty {
                 ForEach(Array(submenuToggles.enumerated()), id: \.offset) { index, toggle in
                     secondLayerCircle(toggle,
+                                      size: placement.secondSize(index),
                                       isActive: activeRef == CircleRef(layer: 1, index: index))
-                        .position(sg.center(index))
+                        .position(placement.secondCenter(index))
                 }
             }
         }
     }
 
-    private func firstLayerCircle(_ function: PlayerFunction, isActive: Bool) -> some View {
+    private func firstLayerCircle(_ function: PlayerFunction, size: CGFloat, isActive: Bool) -> some View {
         VStack(spacing: 3) {
             Image(systemName: icon(for: function))
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: size * 0.4, weight: .semibold))
             Text(function.title)
-                .font(.system(size: 8))
+                .font(.system(size: max(7, size * 0.16)))
                 .lineLimit(1)
                 .fixedSize()
         }
         .foregroundStyle(.white)
-        .frame(width: circleSize, height: circleSize)
+        .frame(width: size, height: size)
         .background {
             Circle().fill(.ultraThinMaterial)
             if isActive { Circle().fill(.white.opacity(0.28)) }
@@ -150,16 +150,16 @@ struct PlayerControlsView: View {
         .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isActive)
     }
 
-    private func secondLayerCircle(_ toggle: QuickToggle, isActive: Bool) -> some View {
+    private func secondLayerCircle(_ toggle: QuickToggle, size: CGFloat, isActive: Bool) -> some View {
         let on = toggleOn(toggle)
         return VStack(spacing: 2) {
             Image(systemName: toggle.icon(on: on))
-                .font(.system(size: 18, weight: .semibold))
+                .font(.system(size: size * 0.38, weight: .semibold))
             Text(toggle.title)
-                .font(.system(size: 8))
+                .font(.system(size: max(7, size * 0.17)))
         }
         .foregroundStyle(on ? Color.black : .white)
-        .frame(width: 46, height: 46)
+        .frame(width: size, height: size)
         .background {
             Circle().fill(on ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.ultraThinMaterial))
             if isActive { Circle().fill(.white.opacity(0.25)) }
