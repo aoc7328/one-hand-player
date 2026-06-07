@@ -20,6 +20,17 @@ struct PlayerView: View {
     @AppStorage("playerHandedness") private var handednessRaw = "right"
     @AppStorage(ArcConfig.storageKey) private var arcRaw = ArcConfig.defaultRaw
 
+    // 半圓位置 / 大小（由「編輯半圓」模式調整、持久化）
+    @AppStorage("arcEdgeOffset") private var arcEdgeOffset = 55.0
+    @AppStorage("arcCenterY") private var arcCenterY = 0.5
+    @AppStorage("arcRadius") private var arcRadius = 220.0
+
+    // 編輯模式
+    @State private var editingArc = false
+    @State private var dragStartEdge: Double?
+    @State private var dragStartCenterY: Double?
+    @State private var magStart: Double?
+
     @State private var controlsVisible = false          // 平時隱藏
     @State private var isLocked = false
     @State private var hud: GestureHUD.Style?
@@ -62,9 +73,8 @@ struct PlayerView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let geom = ArcGeometry(size: geo.size, isLeftHanded: isLeftHanded, count: functions.count)
-            let subGeom = ArcGeometry(size: geo.size, isLeftHanded: isLeftHanded,
-                                      count: submenuToggleList.count, extraRadius: 86)
+            let geom = makeGeometry(size: geo.size, count: functions.count)
+            let subGeom = makeGeometry(size: geo.size, count: submenuToggleList.count, extra: 86)
 
             ZStack {
                 Color.black.ignoresSafeArea()
@@ -75,35 +85,39 @@ struct PlayerView: View {
                     .ignoresSafeArea()
                     .clipped()
 
-                PlayerGestureView(
-                    circles: hitCircles(geom: geom, subGeom: subGeom),
-                    anchor: geom.anchor,
-                    regionRadius: geom.regionRadius,
-                    controlsVisible: controlsVisible,
-                    isLocked: isLocked,
-                    onEvent: handle
-                )
-                .ignoresSafeArea()
-
-                if controlsVisible && !isLocked {
-                    Color.black.opacity(0.22).ignoresSafeArea().allowsHitTesting(false)
-                    PlayerControlsView(
-                        controller: controller,
-                        title: item.title,
-                        geometry: geom,
-                        functions: functions,
-                        orientationMode: orientationMode,
-                        isZoomed: zoomScale > 1,
-                        activeRef: activeRef,
-                        submenuToggles: openSubmenu != nil ? submenuToggleList : [],
-                        submenuGeometry: openSubmenu != nil ? subGeom : nil,
-                        toggleOn: toggleOn,
-                        onClose: close,
-                        onMore: { showMore = true }
+                if editingArc {
+                    editOverlay(geom)
+                } else {
+                    PlayerGestureView(
+                        circles: hitCircles(geom: geom, subGeom: subGeom),
+                        anchor: geom.anchor,
+                        regionRadius: geom.regionRadius,
+                        controlsVisible: controlsVisible,
+                        isLocked: isLocked,
+                        onEvent: handle
                     )
-                }
+                    .ignoresSafeArea()
 
-                if isLocked { lockedOverlay }
+                    if controlsVisible && !isLocked {
+                        Color.black.opacity(0.22).ignoresSafeArea().allowsHitTesting(false)
+                        PlayerControlsView(
+                            controller: controller,
+                            title: item.title,
+                            geometry: geom,
+                            functions: functions,
+                            orientationMode: orientationMode,
+                            isZoomed: zoomScale > 1,
+                            activeRef: activeRef,
+                            submenuToggles: openSubmenu != nil ? submenuToggleList : [],
+                            submenuGeometry: openSubmenu != nil ? subGeom : nil,
+                            toggleOn: toggleOn,
+                            onClose: close,
+                            onMore: { showMore = true }
+                        )
+                    }
+
+                    if isLocked { lockedOverlay }
+                }
 
                 if let hud { GestureHUD(style: hud).transition(.opacity) }
             }
@@ -121,7 +135,8 @@ struct PlayerView: View {
             if loopEnabled { controller.replay() } else { close() }
         }
         .sheet(isPresented: $showMore) {
-            PlayerMoreSheet(controller: controller, orientationMode: $orientationMode)
+            PlayerMoreSheet(controller: controller, orientationMode: $orientationMode,
+                            onEditArc: { withAnimation { editingArc = true } })
         }
         .confirmationDialog("播放速度", isPresented: $showSpeedDialog, titleVisibility: .visible) {
             ForEach(speeds, id: \.self) { s in
@@ -136,6 +151,92 @@ struct PlayerView: View {
                 Button("音軌：\(t.name)") { controller.selectAudioTrack(t.index) }
             }
         }
+    }
+
+    // MARK: - 幾何（套用使用者調整的位置 / 大小）
+
+    private func makeGeometry(size: CGSize, count: Int, extra: CGFloat = 0) -> ArcGeometry {
+        ArcGeometry(size: size, isLeftHanded: isLeftHanded, count: count,
+                    edgeOffset: CGFloat(arcEdgeOffset),
+                    centerYFraction: CGFloat(arcCenterY),
+                    baseRadius: CGFloat(arcRadius),
+                    extraRadius: extra)
+    }
+
+    // MARK: - 編輯半圓模式
+
+    @ViewBuilder
+    private func editOverlay(_ geom: ArcGeometry) -> some View {
+        ZStack {
+            Color.black.opacity(0.45).ignoresSafeArea()
+
+            ArcPreviewView(geometry: geom, functions: functions)
+
+            // 手勢接收層（單指拖動移動、雙指縮放）
+            Color.clear
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .gesture(editDrag)
+                .simultaneousGesture(editMagnify)
+
+            VStack {
+                HStack(spacing: 12) {
+                    Text("編輯半圓").font(.headline)
+                    Spacer()
+                    Button("重設") { resetArc() }
+                        .buttonStyle(.bordered)
+                    Button("完成") { withAnimation { editingArc = false } }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding()
+                .background(.ultraThinMaterial)
+                .tint(.white)
+
+                Spacer()
+
+                Text("單指拖動移動圓心・雙指縮放大小")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.vertical, 8).padding(.horizontal, 14)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 36)
+            }
+        }
+        .transition(.opacity)
+    }
+
+    private var editDrag: some Gesture {
+        DragGesture()
+            .onChanged { v in
+                if dragStartEdge == nil {
+                    dragStartEdge = arcEdgeOffset
+                    dragStartCenterY = arcCenterY
+                }
+                // 往螢幕中央拖 → 圓心更靠內（edgeOffset 變小）；左右手方向相反
+                let sign: Double = isLeftHanded ? -1 : 1
+                arcEdgeOffset = min(max(dragStartEdge! + sign * Double(v.translation.width), -220), 400)
+                let h = max(Double(playerSize.height), 1)
+                arcCenterY = min(max(dragStartCenterY! + Double(v.translation.height) / h, 0.12), 0.88)
+            }
+            .onEnded { _ in dragStartEdge = nil; dragStartCenterY = nil }
+    }
+
+    private var editMagnify: some Gesture {
+        MagnificationGesture()
+            .onChanged { scale in
+                if magStart == nil { magStart = arcRadius }
+                arcRadius = min(max(magStart! * Double(scale), 90), 430)
+            }
+            .onEnded { _ in magStart = nil }
+    }
+
+    private func resetArc() {
+        withAnimation {
+            arcEdgeOffset = 55
+            arcCenterY = 0.5
+            arcRadius = 220
+        }
+        Haptics.selection()
     }
 
     // MARK: - 命中圓

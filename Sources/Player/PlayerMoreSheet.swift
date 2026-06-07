@@ -4,6 +4,7 @@ import SwiftUI
 struct PlayerMoreSheet: View {
     @ObservedObject var controller: VLCPlayerController
     @Binding var orientationMode: ScreenOrientationMode
+    var onEditArc: () -> Void = {}
 
     @AppStorage("playerHandedness") private var handednessRaw = "right"
     @AppStorage(ArcConfig.storageKey) private var arcRaw = ArcConfig.defaultRaw
@@ -70,8 +71,14 @@ struct PlayerMoreSheet: View {
                     } label: {
                         Label("自訂半圓功能", systemImage: "slider.horizontal.3")
                     }
+                    Button {
+                        dismiss()
+                        onEditArc()
+                    } label: {
+                        Label("編輯半圓位置 / 大小", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+                    }
                 } footer: {
-                    Text("選擇要放在半圓上的功能與順序（建議 5 個以上）。")
+                    Text("自訂功能：選擇半圓上的功能與順序（建議 5 個以上）。\n編輯位置 / 大小：單指拖動移動、雙指縮放，自己調到最順手。")
                 }
             }
             .navigationTitle("更多")
