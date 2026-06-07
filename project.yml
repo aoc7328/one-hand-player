@@ -1,0 +1,37 @@
+# XcodeGen 專案定義。
+# 在 Mac 上執行 `xcodegen generate` 會依此產生 OneHandPlayer.xcodeproj，
+# 接著 `pod install` 整合 MobileVLCKit，再用 OneHandPlayer.xcworkspace 開啟。
+#
+# 這樣 repo 裡不需要塞進龐大又易衝突的 .xcodeproj，CI 也能重現建置。
+name: OneHandPlayer
+options:
+  bundleIdPrefix: com.onehandplayer
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    ENABLE_BITCODE: NO
+
+targets:
+  OneHandPlayer:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+        excludes:
+          - "App/Info.plist"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.onehandplayer.app
+        PRODUCT_NAME: OneHandPlayer
+        INFOPLIST_FILE: Sources/App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        # 個人簽章時把下面填上你的 Apple ID Team ID，CI 純建置可留空
+        DEVELOPMENT_TEAM: ""

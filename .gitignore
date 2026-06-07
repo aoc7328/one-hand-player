@@ -1,0 +1,18 @@
+# Xcode / Swift
+*.xcodeproj
+*.xcworkspace
+!default.xcworkspace
+xcuserdata/
+DerivedData/
+build/
+*.xcuserstate
+
+# CocoaPods（依賴由 Podfile 還原，不入庫）
+Pods/
+
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
