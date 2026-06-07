@@ -1,14 +1,14 @@
 import SwiftUI
+import UIKit
 
-/// 全螢幕播放畫面：影像層 + 手勢層 + 控制覆蓋層 + 手勢 HUD + 鎖定層。
+/// 全螢幕播放畫面。
 ///
-/// 單手操作邏輯全部在這裡彙整：
-/// - 單擊：顯示 / 隱藏控制列
-/// - 雙擊左 / 右：快退 / 快進 10 秒；雙擊中央：播放 / 暫停
-/// - 直向拖曳（左半）：亮度；（右半）：音量
-/// - 橫向拖曳：精準跳轉（scrub）
-/// - 長按：暫時 2× 加速，放開還原
-/// - 鎖定鈕：避免口袋 / 單手誤觸
+/// 互動核心（達文西調色盤式拇指面板）：
+/// - 半圓上可自訂的功能小圓；點一下 = tap 功能，按住 2D 滑動 = drag 功能
+///   （音量·亮度：上下音量、左右亮度；跳轉·速度：左右跳轉、上下速度）
+/// - 半圓區雙擊 = 影片放大 / 縮回
+/// - 半圓區空白拖曳（放大後）= 平移可視範圍
+/// - 方向鎖 = 自動 / 鎖橫 / 鎖直循環
 struct PlayerView: View {
     let item: MediaItem
     @EnvironmentObject private var library: LibraryStore
@@ -16,67 +16,127 @@ struct PlayerView: View {
 
     @StateObject private var controller = VLCPlayerController()
 
+    @AppStorage("playerHandedness") private var handednessRaw = "right"
+    @AppStorage(ArcConfig.storageKey) private var arcRaw = ArcConfig.defaultRaw
+
     @State private var controlsVisible = true
     @State private var isLocked = false
     @State private var hud: GestureHUD.Style?
+    @State private var activeDragIndex: Int?
 
-    // 拖曳起始值（沒有 UIKit 的 .began 概念，第一次 changed 時捕捉）
-    @State private var dragActive = false
+    // 影片縮放 / 平移
+    @State private var zoomScale: CGFloat = 1
+    @State private var panOffset: CGSize = .zero
+    @State private var panStart: CGSize = .zero
+
+    // 方向
+    @State private var orientationMode: ScreenOrientationMode = .auto
+
+    // 量測畫面尺寸供手勢換算
+    @State private var playerSize: CGSize = .zero
+
+    // 拖曳起始值
+    @State private var dragStartVolume = 100
+    @State private var dragStartBrightness = 0.5
     @State private var dragStartTime: Double = 0
-    @State private var dragStartBrightness: Double = 0
-    @State private var dragStartVolume: Int = 100
-    @State private var seekTargetTime: Double = 0
+    @State private var dragStartRate: Float = 1
+    @State private var seekTarget: Double = 0
 
-    // 長按加速前的原速度
-    @State private var rateBeforeBoost: Float = 1.0
+    // 面板
+    @State private var showMore = false
+    @State private var showSpeedDialog = false
+    @State private var showTracksDialog = false
 
     @State private var hideControlsTask: Task<Void, Never>?
     @State private var hideHUDTask: Task<Void, Never>?
 
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+    private let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
-            VLCVideoView(player: controller.player)
+    private var functions: [PlayerFunction] { ArcConfig.decode(arcRaw) }
+    private var isLeftHanded: Bool { handednessRaw == "left" }
+    private var primaryIndex: Int? { functions.firstIndex(of: .playPause) }
+
+    var body: some View {
+        GeometryReader { geo in
+            let geom = ArcGeometry(size: geo.size, isLeftHanded: isLeftHanded, count: functions.count)
+
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                VLCVideoView(player: controller.player)
+                    .scaleEffect(zoomScale)
+                    .offset(panOffset)
+                    .ignoresSafeArea()
+                    .clipped()
+
+                // 手勢層（在視覺層之下，但視覺層的半圓不吃觸控，所以命中落在這裡）
+                PlayerGestureView(
+                    circles: hitCircles(geom),
+                    anchor: geom.anchor,
+                    regionRadius: geom.regionRadius,
+                    controlsVisible: controlsVisible,
+                    isLocked: isLocked,
+                    onEvent: handle
+                )
                 .ignoresSafeArea()
 
-            // 手勢層鋪滿全螢幕
-            PlayerGestureView(
-                onSingleTap: handleSingleTap,
-                onDoubleTap: handleDoubleTap,
-                onDragChanged: handleDragChanged,
-                onDragEnded: handleDragEnded,
-                onLongPressChanged: handleLongPress
-            )
-            .ignoresSafeArea()
+                if controlsVisible && !isLocked {
+                    Color.black.opacity(0.22).ignoresSafeArea().allowsHitTesting(false)
+                    PlayerControlsView(
+                        controller: controller,
+                        title: item.title,
+                        geometry: geom,
+                        functions: functions,
+                        orientationMode: orientationMode,
+                        isZoomed: zoomScale > 1,
+                        activeDragIndex: activeDragIndex,
+                        onClose: close
+                    )
+                }
 
-            // 控制覆蓋層
-            if controlsVisible && !isLocked {
-                Color.black.opacity(0.25).ignoresSafeArea()
-                    .allowsHitTesting(false)
-                PlayerControlsView(controller: controller,
-                                   title: item.title,
-                                   isLocked: $isLocked,
-                                   onClose: close)
-                    .transition(.opacity)
-            }
+                if isLocked { lockedOverlay }
 
-            // 鎖定時的小解鎖鈕
-            if isLocked {
-                lockedOverlay
+                if let hud {
+                    GestureHUD(style: hud).transition(.opacity)
+                }
             }
-
-            // 手勢 HUD
-            if let hud {
-                GestureHUD(style: hud)
-                    .transition(.opacity)
-            }
+            .onAppear { playerSize = geo.size }
+            .onChange(of: geo.size) { playerSize = $0 }
         }
         .statusBarHidden(true)
         .onAppear(perform: start)
-        .onDisappear { controller.teardown() }
-        .onChange(of: controller.didFinish) { finished in
-            if finished { close() }
+        .onDisappear {
+            controller.teardown()
+            OrientationLock.apply(.auto)   // 離開時釋放方向鎖
+        }
+        .onChange(of: controller.didFinish) { if $0 { close() } }
+        .sheet(isPresented: $showMore) {
+            PlayerMoreSheet(controller: controller, orientationMode: $orientationMode)
+        }
+        .confirmationDialog("播放速度", isPresented: $showSpeedDialog, titleVisibility: .visible) {
+            ForEach(speeds, id: \.self) { s in
+                Button(String(format: "%.2g×", s)) { controller.setRate(Float(s)) }
+            }
+        }
+        .confirmationDialog("字幕 / 音軌", isPresented: $showTracksDialog, titleVisibility: .visible) {
+            ForEach(controller.subtitleTracks, id: \.index) { t in
+                Button("字幕：\(t.name)") { controller.selectSubtitleTrack(t.index) }
+            }
+            ForEach(controller.audioTracks, id: \.index) { t in
+                Button("音軌：\(t.name)") { controller.selectAudioTrack(t.index) }
+            }
+        }
+    }
+
+    // MARK: - 命中圓
+
+    private func hitCircles(_ geom: ArcGeometry) -> [PlayerGestureView.HitCircle] {
+        functions.indices.map { i in
+            PlayerGestureView.HitCircle(
+                index: i,
+                center: geom.center(i),
+                radius: i == primaryIndex ? 42 : 34
+            )
         }
     }
 
@@ -84,132 +144,205 @@ struct PlayerView: View {
 
     private func start() {
         guard let url = library.resolvedURL(for: item) else { return }
-        // 網路 / NAS 來源要先取得安全範圍存取（本機書籤情況）
-        controller.load(url: url,
-                        itemID: item.id,
-                        resumeAt: item.positionSeconds) { id, pos, dur, force in
+        controller.load(url: url, itemID: item.id, resumeAt: item.positionSeconds) { id, pos, dur, force in
             library.updateProgress(for: id, position: pos, duration: dur, force: force)
         }
         dragStartVolume = controller.volume
+        OrientationLock.apply(orientationMode)
         scheduleHideControls()
     }
 
     private func close() {
         controller.teardown()
+        OrientationLock.apply(.auto)
         dismiss()
     }
 
-    // MARK: - 控制列自動隱藏
+    // MARK: - 事件分派
+
+    private func handle(_ event: PlayerGestureEvent) {
+        switch event {
+        case .toggleControls:
+            toggleControls()
+        case .tapCircle(let i):
+            guard functions.indices.contains(i) else { return }
+            tapFunction(functions[i])
+        case .circleDragBegan(let i):
+            guard functions.indices.contains(i) else { return }
+            activeDragIndex = i
+            beginDrag(functions[i])
+        case .circleDragChanged(let i, let t, let size):
+            guard functions.indices.contains(i) else { return }
+            updateDrag(functions[i], translation: t, viewSize: size)
+        case .circleDragEnded(let i):
+            if functions.indices.contains(i) { endDrag(functions[i]) }
+            activeDragIndex = nil
+            scheduleHideControls()
+        case .regionDoubleTap:
+            toggleZoom()
+        case .regionPanBegan:
+            panStart = panOffset
+        case .regionPanChanged(let t):
+            updatePan(t)
+        case .regionPanEnded:
+            break
+        }
+    }
+
+    // MARK: - Tap 功能
+
+    private func tapFunction(_ f: PlayerFunction) {
+        switch f {
+        case .playPause:
+            controller.togglePlayPause(); Haptics.rigid()
+        case .zoom:
+            toggleZoom()
+        case .orientation:
+            cycleOrientation()
+        case .lock:
+            withAnimation { isLocked = true }; Haptics.selection()
+        case .subtitleAudio:
+            showTracksDialog = true
+        case .speed:
+            showSpeedDialog = true
+        case .handedness:
+            toggleHandedness()
+        case .more:
+            showMore = true
+        case .volumeBrightness, .seekSpeed:
+            break // 純拖曳型
+        }
+        if controlsVisible { scheduleHideControls() }
+    }
+
+    // MARK: - 2D 拖曳功能
+
+    private func beginDrag(_ f: PlayerFunction) {
+        hideControlsTask?.cancel()
+        switch f {
+        case .volumeBrightness:
+            dragStartVolume = controller.volume
+            dragStartBrightness = Double(UIScreen.main.brightness)
+        case .seekSpeed:
+            dragStartTime = controller.currentTime
+            dragStartRate = controller.rate
+            seekTarget = controller.currentTime
+        default:
+            break
+        }
+    }
+
+    private func updateDrag(_ f: PlayerFunction, translation t: CGSize, viewSize: CGSize) {
+        let w = max(viewSize.width, 1)
+        let h = max(viewSize.height, 1)
+        switch f {
+        case .volumeBrightness:
+            let vFrac = -t.height / h
+            let newVol = min(max(dragStartVolume + Int(vFrac * 200), 0), 200)
+            controller.setVolume(newVol)
+
+            let hFrac = t.width / w
+            let newBright = min(max(dragStartBrightness + Double(hFrac), 0), 1)
+            UIScreen.main.brightness = CGFloat(newBright)
+
+            showHUD(.dual(vIcon: "speaker.wave.2.fill", vText: "\(newVol)%",
+                          hIcon: "sun.max.fill", hText: "\(Int(newBright * 100))%"),
+                    autoDismiss: false)
+
+        case .seekSpeed:
+            let hFrac = t.width / w
+            let target = min(max(dragStartTime + Double(hFrac) * 90, 0), controller.duration)
+            seekTarget = target
+
+            let vFrac = -t.height / h
+            let newRate = min(max(dragStartRate + Float(vFrac) * 1.5, 0.25), 4.0)
+            controller.setRate(newRate)
+
+            let delta = target - dragStartTime
+            let sign = delta >= 0 ? "+" : "−"
+            showHUD(.dual(vIcon: "speedometer", vText: String(format: "%.2g×", Double(newRate)),
+                          hIcon: "timeline.selection",
+                          hText: "\(TimeFormatter.string(from: target)) (\(sign)\(TimeFormatter.string(from: abs(delta))))"),
+                    autoDismiss: false)
+
+        default:
+            break
+        }
+    }
+
+    private func endDrag(_ f: PlayerFunction) {
+        if f == .seekSpeed {
+            controller.seek(to: seekTarget); Haptics.selection()
+        }
+        dismissHUDSoon()
+    }
+
+    // MARK: - 縮放 / 平移
+
+    private func toggleZoom() {
+        let zoomIn = zoomScale <= 1
+        withAnimation(.easeInOut(duration: 0.25)) {
+            zoomScale = zoomIn ? 2 : 1
+            if !zoomIn { panOffset = .zero }
+        }
+        Haptics.rigid()
+        showHUD(.info(icon: zoomIn ? "plus.magnifyingglass" : "minus.magnifyingglass",
+                      text: zoomIn ? "放大 2×" : "原始大小"),
+                autoDismiss: true)
+    }
+
+    private func updatePan(_ t: CGSize) {
+        guard zoomScale > 1 else { return }
+        let maxX = playerSize.width * (zoomScale - 1) / 2
+        let maxY = playerSize.height * (zoomScale - 1) / 2
+        panOffset = CGSize(
+            width: min(max(panStart.width + t.width, -maxX), maxX),
+            height: min(max(panStart.height + t.height, -maxY), maxY)
+        )
+    }
+
+    // MARK: - 方向 / 慣用手
+
+    private func cycleOrientation() {
+        orientationMode = orientationMode.next
+        OrientationLock.apply(orientationMode)
+        Haptics.selection()
+        showHUD(.info(icon: orientationMode.icon, text: orientationMode.title), autoDismiss: true)
+    }
+
+    private func toggleHandedness() {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+            handednessRaw = isLeftHanded ? "right" : "left"
+        }
+        Haptics.rigid()
+    }
+
+    // MARK: - 控制顯隱 / HUD
+
+    private func toggleControls() {
+        withAnimation { controlsVisible.toggle() }
+        if controlsVisible { scheduleHideControls() }
+    }
 
     private func scheduleHideControls() {
         hideControlsTask?.cancel()
         hideControlsTask = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
-            if !Task.isCancelled {
-                withAnimation { controlsVisible = false }
-            }
+            if !Task.isCancelled { withAnimation { controlsVisible = false } }
         }
     }
 
     private func showHUD(_ style: GestureHUD.Style, autoDismiss: Bool) {
         withAnimation(.easeOut(duration: 0.12)) { hud = style }
         hideHUDTask?.cancel()
-        if autoDismiss {
-            hideHUDTask = Task {
-                try? await Task.sleep(nanoseconds: 700_000_000)
-                if !Task.isCancelled { withAnimation { hud = nil } }
-            }
-        }
+        if autoDismiss { dismissHUDSoon() }
     }
 
-    // MARK: - 手勢處理
-
-    private func handleSingleTap() {
-        guard !isLocked else { return }
-        withAnimation { controlsVisible.toggle() }
-        if controlsVisible { scheduleHideControls() }
-    }
-
-    private func handleDoubleTap(side: PlayerGestureView.ScreenSide?, isCenter: Bool) {
-        guard !isLocked else { return }
-        if isCenter {
-            controller.togglePlayPause()
-            Haptics.rigid()
-            return
-        }
-        guard let side else { return }
-        let delta: Int32 = side == .left ? -10 : 10
-        controller.skip(delta)
-        Haptics.light()
-        let target = min(max(controller.currentTime + Double(delta), 0), controller.duration)
-        showHUD(.seek(target: target, total: controller.duration, delta: Double(delta)),
-                autoDismiss: true)
-    }
-
-    private func handleDragChanged(axis: PlayerGestureView.DragAxis,
-                                   side: PlayerGestureView.ScreenSide,
-                                   translation: CGSize,
-                                   viewSize: CGSize) {
-        guard !isLocked else { return }
-
-        if !dragActive {
-            dragActive = true
-            dragStartTime = controller.currentTime
-            dragStartBrightness = Double(UIScreen.main.brightness)
-            dragStartVolume = controller.volume
-        }
-
-        switch axis {
-        case .horizontal:
-            // 整個螢幕寬 ≈ 90 秒跳轉幅度
-            let fraction = translation.width / max(viewSize.width, 1)
-            let delta = Double(fraction) * 90.0
-            let target = min(max(dragStartTime + delta, 0), controller.duration)
-            seekTargetTime = target
-            showHUD(.seek(target: target, total: controller.duration, delta: target - dragStartTime),
-                    autoDismiss: false)
-
-        case .vertical:
-            // 往上 = 增加；整個螢幕高 = 滿格
-            let fraction = -translation.height / max(viewSize.height, 1)
-            if side == .left {
-                let newValue = min(max(dragStartBrightness + Double(fraction), 0), 1)
-                UIScreen.main.brightness = CGFloat(newValue)
-                showHUD(.brightness(newValue), autoDismiss: false)
-            } else {
-                let newValue = min(max(dragStartVolume + Int(fraction * 200), 0), 200)
-                controller.setVolume(newValue)
-                showHUD(.volume(newValue), autoDismiss: false)
-            }
-        }
-    }
-
-    private func handleDragEnded() {
-        guard !isLocked else { return }
-        // 橫向拖曳放開時才真正 seek（拖曳中只更新 HUD，較省效能）
-        if case .seek? = hud {
-            controller.seek(to: seekTargetTime)
-            Haptics.selection()
-        }
-        dragActive = false
-        // 放開後短暫保留 HUD 再淡出
+    private func dismissHUDSoon() {
         hideHUDTask?.cancel()
         hideHUDTask = Task {
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try? await Task.sleep(nanoseconds: 700_000_000)
             if !Task.isCancelled { withAnimation { hud = nil } }
-        }
-    }
-
-    private func handleLongPress(active: Bool) {
-        guard !isLocked else { return }
-        if active {
-            rateBeforeBoost = controller.rate
-            controller.setRate(2.0)
-            Haptics.rigid()
-            showHUD(.speed(2.0), autoDismiss: false)
-        } else {
-            controller.setRate(rateBeforeBoost)
-            withAnimation { hud = nil }
         }
     }
 

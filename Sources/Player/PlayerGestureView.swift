@@ -1,53 +1,60 @@
 import SwiftUI
 import UIKit
 
-/// 播放器手勢層。
+/// 播放器手勢事件。由手勢層辨識後回報給 PlayerView 處理。
+enum PlayerGestureEvent {
+    case toggleControls                              // 點空白處：顯示 / 隱藏控制
+    case tapCircle(Int)                              // 點某個功能小圓
+    case circleDragBegan(Int)
+    case circleDragChanged(index: Int, translation: CGSize, viewSize: CGSize)
+    case circleDragEnded(Int)
+    case regionDoubleTap                             // 半圓區雙擊：縮放
+    case regionPanBegan
+    case regionPanChanged(CGSize)                    // 半圓區拖曳：平移可視範圍
+    case regionPanEnded
+}
+
+/// 全螢幕手勢層。
 ///
-/// 用 UIKit 手勢辨識器（而非 SwiftUI gesture）有兩個理由：
-/// 1. 能精準拿到觸控座標，判斷螢幕左半 / 右半（亮度 vs 音量）。
-/// 2. 多手勢（單擊、雙擊、拖曳、長按）共存與相依關係（單擊需等雙擊失敗）較好控制。
-///
-/// 全部以閉包回報，邏輯與畫面狀態仍留在 SwiftUI 的 `PlayerView`。
+/// 用 UIKit 手勢辨識器做精準命中判定（哪顆小圓 / 是否在半圓區內），把所有
+/// 觸控轉成語意化事件。視覺上的小圓由上層 SwiftUI 繪製且不吃觸控，命中完全
+/// 以這裡傳入的幾何為準，確保看到的位置 == 可操作的位置。
 struct PlayerGestureView: UIViewRepresentable {
 
-    enum DragAxis { case horizontal, vertical }
-    enum ScreenSide { case left, right }
+    /// 一顆可命中的小圓：索引、圓心、命中半徑。
+    struct HitCircle {
+        let index: Int
+        let center: CGPoint
+        let radius: CGFloat
+    }
 
-    /// 單擊（切換控制列顯示）。
-    var onSingleTap: () -> Void
-    /// 雙擊；帶上點擊落在左 / 中 / 右哪一區。
-    var onDoubleTap: (_ side: ScreenSide?, _ isCenter: Bool) -> Void
-    /// 拖曳變化。第一次移動決定 axis；vertical 時帶上左 / 右半邊。
-    var onDragChanged: (_ axis: DragAxis, _ side: ScreenSide, _ translation: CGSize, _ viewSize: CGSize) -> Void
-    var onDragEnded: () -> Void
-    /// 長按開始 / 結束（用來做「按住加速」）。
-    var onLongPressChanged: (_ active: Bool) -> Void
+    var circles: [HitCircle]
+    var anchor: CGPoint
+    var regionRadius: CGFloat
+    var controlsVisible: Bool
+    var isLocked: Bool
+    var onEvent: (PlayerGestureEvent) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> UIView {
         let view = UIView()
         view.backgroundColor = .clear
-        view.isMultipleTouchEnabled = true
 
-        let single = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleSingleTap(_:)))
-        single.numberOfTapsRequired = 1
-
-        let double = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
+        let single = UITapGestureRecognizer(target: context.coordinator,
+                                            action: #selector(Coordinator.handleSingleTap(_:)))
+        let double = UITapGestureRecognizer(target: context.coordinator,
+                                            action: #selector(Coordinator.handleDoubleTap(_:)))
         double.numberOfTapsRequired = 2
-        // 只有雙擊「失敗」時才認定為單擊，避免雙擊同時觸發單擊。
         single.require(toFail: double)
 
-        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        let pan = UIPanGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handlePan(_:)))
         pan.maximumNumberOfTouches = 1
-
-        let longPress = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLongPress(_:)))
-        longPress.minimumPressDuration = 0.45
 
         view.addGestureRecognizer(single)
         view.addGestureRecognizer(double)
         view.addGestureRecognizer(pan)
-        view.addGestureRecognizer(longPress)
         return view
     }
 
@@ -59,26 +66,44 @@ struct PlayerGestureView: UIViewRepresentable {
 
     final class Coordinator: NSObject {
         var parent: PlayerGestureView
-        private var currentAxis: DragAxis?
-        private var dragSide: ScreenSide = .right
+
+        private enum PanMode { case none, circle(Int), region }
+        private var panMode: PanMode = .none
 
         init(_ parent: PlayerGestureView) { self.parent = parent }
 
+        /// 命中哪顆小圓（取最近且在半徑內者）。
+        private func hitCircle(at p: CGPoint) -> Int? {
+            guard parent.controlsVisible else { return nil }
+            var best: (index: Int, dist: CGFloat)?
+            for c in parent.circles {
+                let d = hypot(p.x - c.center.x, p.y - c.center.y)
+                if d <= c.radius, best == nil || d < best!.dist {
+                    best = (c.index, d)
+                }
+            }
+            return best?.index
+        }
+
+        private func inRegion(_ p: CGPoint) -> Bool {
+            hypot(p.x - parent.anchor.x, p.y - parent.anchor.y) <= parent.regionRadius
+        }
+
         @objc func handleSingleTap(_ g: UITapGestureRecognizer) {
-            parent.onSingleTap()
+            guard let view = g.view, !parent.isLocked else { return }
+            let p = g.location(in: view)
+            if let idx = hitCircle(at: p) {
+                parent.onEvent(.tapCircle(idx))
+            } else {
+                parent.onEvent(.toggleControls)
+            }
         }
 
         @objc func handleDoubleTap(_ g: UITapGestureRecognizer) {
-            guard let view = g.view else { parent.onDoubleTap(nil, false); return }
-            let x = g.location(in: view).x
-            let w = view.bounds.width
-            // 左 1/3、中 1/3、右 1/3
-            if x < w / 3 {
-                parent.onDoubleTap(.left, false)
-            } else if x > w * 2 / 3 {
-                parent.onDoubleTap(.right, false)
-            } else {
-                parent.onDoubleTap(nil, true)
+            guard let view = g.view, !parent.isLocked else { return }
+            let p = g.location(in: view)
+            if inRegion(p) {
+                parent.onEvent(.regionDoubleTap)
             }
         }
 
@@ -88,38 +113,40 @@ struct PlayerGestureView: UIViewRepresentable {
 
             switch g.state {
             case .began:
-                currentAxis = nil
-                let startX = g.location(in: view).x
-                dragSide = startX < view.bounds.width / 2 ? .left : .right
+                if parent.isLocked { panMode = .none; return }
+                let start = g.location(in: view)
+                if let idx = hitCircle(at: start) {
+                    panMode = .circle(idx)
+                    parent.onEvent(.circleDragBegan(idx))
+                } else if inRegion(start) {
+                    panMode = .region
+                    parent.onEvent(.regionPanBegan)
+                } else {
+                    panMode = .none
+                }
 
             case .changed:
-                // 第一次累積到門檻才鎖定方向，避免抖動誤判。
-                if currentAxis == nil {
-                    let absX = abs(translation.x)
-                    let absY = abs(translation.y)
-                    guard max(absX, absY) > 14 else { return }
-                    currentAxis = absX > absY ? .horizontal : .vertical
+                switch panMode {
+                case .circle(let idx):
+                    parent.onEvent(.circleDragChanged(index: idx,
+                                                      translation: CGSize(width: translation.x,
+                                                                          height: translation.y),
+                                                      viewSize: view.bounds.size))
+                case .region:
+                    parent.onEvent(.regionPanChanged(CGSize(width: translation.x,
+                                                            height: translation.y)))
+                case .none:
+                    break
                 }
-                guard let axis = currentAxis else { return }
-                parent.onDragChanged(axis, dragSide,
-                                     CGSize(width: translation.x, height: translation.y),
-                                     view.bounds.size)
 
             case .ended, .cancelled, .failed:
-                if currentAxis != nil { parent.onDragEnded() }
-                currentAxis = nil
+                switch panMode {
+                case .circle(let idx): parent.onEvent(.circleDragEnded(idx))
+                case .region:          parent.onEvent(.regionPanEnded)
+                case .none:            break
+                }
+                panMode = .none
 
-            default:
-                break
-            }
-        }
-
-        @objc func handleLongPress(_ g: UILongPressGestureRecognizer) {
-            switch g.state {
-            case .began:
-                parent.onLongPressChanged(true)
-            case .ended, .cancelled, .failed:
-                parent.onLongPressChanged(false)
             default:
                 break
             }

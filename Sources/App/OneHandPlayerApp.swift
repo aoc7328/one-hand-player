@@ -6,6 +6,8 @@ import SwiftUI
 /// 已儲存的 NAS / 網路來源），透過 `environmentObject` 注入給所有畫面。
 @main
 struct OneHandPlayerApp: App {
+    // 提供方向鎖定所需的 AppDelegate
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var library = LibraryStore()
 
     var body: some Scene {

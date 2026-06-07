@@ -8,6 +8,9 @@ struct GestureHUD: View {
         case volume(Int)               // 0...200
         case seek(target: Double, total: Double, delta: Double) // 秒
         case speed(Float)
+        case info(icon: String, text: String)   // 通用：方向鎖、縮放等
+        /// 2D 功能拖曳：垂直軸 + 水平軸各一個參數。
+        case dual(vIcon: String, vText: String, hIcon: String, hText: String)
     }
 
     let style: Style
@@ -34,10 +37,38 @@ struct GestureHUD: View {
                 .padding(.horizontal, 18)
                 .padding(.vertical, 12)
                 .background(.ultraThinMaterial, in: Capsule())
+
+            case .info(let icon, let text):
+                HStack(spacing: 8) {
+                    Image(systemName: icon)
+                    Text(text).font(.headline)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(.ultraThinMaterial, in: Capsule())
+
+            case .dual(let vIcon, let vText, let hIcon, let hText):
+                VStack(spacing: 12) {
+                    dualRow(icon: vIcon, text: vText, axis: "↕")
+                    dualRow(icon: hIcon, text: hText, axis: "↔")
+                }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 16)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
             }
         }
         .foregroundStyle(.white)
         .shadow(radius: 8)
+    }
+
+    private func dualRow(icon: String, text: String, axis: String) -> some View {
+        HStack(spacing: 10) {
+            Text(axis).font(.caption.weight(.bold)).foregroundStyle(.white.opacity(0.6))
+            Image(systemName: icon).frame(width: 22)
+            Text(text).font(.headline.monospacedDigit())
+            Spacer(minLength: 0)
+        }
+        .frame(width: 150, alignment: .leading)
     }
 
     private func bar(icon: String, fraction: Double, label: String) -> some View {
