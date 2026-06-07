@@ -3,47 +3,50 @@ import CoreGraphics
 
 /// 拇指半圓的幾何計算。
 ///
-/// 以拇指根部（畫面下角）為圓心，沿弧線排列功能小圓；同一份幾何同時給
-/// 「視覺層」(ArcControlsView) 與「手勢層」(PlayerGestureView) 使用，確保
-/// 看到的小圓位置和實際可點擊 / 拖曳的判定完全一致。
+/// 圓心（拇指根部）落在**側邊中線**上：左手＝緊貼左邊緣、右手＝緊貼右邊緣，
+/// 垂直位置在螢幕水平中線（height/2），圓心本身落在螢幕外側約 1cm。半圓往螢幕
+/// 中央打開。半徑用「物理尺寸」（約 4cm）而非螢幕比例 —— 拇指是固定大小的。
 ///
-/// 角度以水平 x 軸為 0°、垂直向上為 90°。拇指最好按的是「上半部」（靠垂直），
-/// 所以 index 0 放在最頂端（90°，最舒適），index 越大越往下（靠水平、近拇指根，
-/// 較不順手），常用功能擺前面、不常用的（方向鎖）擺最後。
+/// 角度以水平 x 軸（指向螢幕內）為 0°、向上為正、向下為負。常用功能放上半部
+/// （偏上、最順手），不常用的（方向鎖）放下半部。index 0 在最上端。
+///
+/// 換算：現代 iPhone 邏輯點約 55 pt/cm（不同機型 54–56，取概值，之後可微調）。
 struct ArcGeometry {
     let size: CGSize
     let isLeftHanded: Bool
     let count: Int
+    var extraRadius: CGFloat = 0
 
-    var pivotInset: CGFloat = 46
-    var startDeg: Double = 22       // 下端（靠水平、近拇指根，較不順手）
-    var endDeg: Double = 90         // 上端（垂直，最順手）
-    var extraRadius: CGFloat = 0    // 第二層用：往外擴一圈
+    /// ≈ 1 cm。圓心在螢幕側邊外的外推量。
+    var sideOutset: CGFloat = 55
+    /// ≈ 4 cm。基準半徑。
+    var baseRadius: CGFloat = 220
 
-    /// 拇指根部圓心。
+    var topDeg: Double = 60         // 上端（偏上、最順手），index 0
+    var botDeg: Double = -40        // 下端（過水平往下，較不順手），最後一顆
+
+    /// 拇指根部圓心：側邊中線、螢幕外側約 1cm。
     var anchor: CGPoint {
-        CGPoint(x: isLeftHanded ? pivotInset : size.width - pivotInset,
-                y: size.height - pivotInset)
+        CGPoint(x: isLeftHanded ? -sideOutset : size.width + sideOutset,
+                y: size.height / 2)
     }
 
-    /// 弧線半徑：依畫面高度縮放並設上限，避免直向時太高搆不到。
+    /// 半徑；夾限以免在矮畫面（橫向）時超出上下邊。
     var radius: CGFloat {
-        min(max(size.height * 0.62, 150), 240) + extraRadius
+        min(baseRadius + extraRadius, size.height / 2 - 24)
     }
 
     /// 半圓「可操作區域」半徑（雙擊縮放 / 平移判定用）。
-    var regionRadius: CGFloat {
-        min(max(size.height * 0.62, 150), 240) + 52
-    }
+    var regionRadius: CGFloat { radius + 40 }
 
-    /// 弧線上參數 t（0 頂端 → 1 下端）對應座標。
+    /// 弧線上參數 t（0 上端 → 1 下端）對應座標。
     func point(t: Double) -> CGPoint {
         let a = anchor
         let r = radius
-        let deg = endDeg - (endDeg - startDeg) * t   // t=0 → 頂端(90°)
+        let deg = topDeg - (topDeg - botDeg) * t   // t=0 → 上端
         let rad = deg * .pi / 180
-        let dx = CGFloat(cos(rad)) * r * (isLeftHanded ? 1 : -1)
-        let dy = -CGFloat(sin(rad)) * r
+        let dx = CGFloat(cos(rad)) * r * (isLeftHanded ? 1 : -1)  // 往螢幕內
+        let dy = -CGFloat(sin(rad)) * r                          // 正角度=向上
         return CGPoint(x: a.x + dx, y: a.y + dy)
     }
 
