@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// 播放器覆蓋層「視覺」：頂列（關閉 / 標題 / 緩衝）、進度條，以及半圓功能小圓。
+/// 播放器覆蓋層「視覺」：頂列（關閉 / 標題 / 更多）、進度條、半圓功能小圓、第二層開關。
 ///
-/// 重點：小圓只負責「畫」，所有命中與拖曳由 `PlayerGestureView` 依相同幾何處理，
-/// 因此整個半圓視覺都 `allowsHitTesting(false)`，只有頂列與進度條可互動。
+/// 小圓只負責「畫」，命中與拖曳由 `PlayerGestureView` 依相同幾何處理，因此整個
+/// 半圓視覺都 `allowsHitTesting(false)`，只有頂列與進度條可互動。
 struct PlayerControlsView: View {
     @ObservedObject var controller: VLCPlayerController
     let title: String
@@ -11,21 +11,26 @@ struct PlayerControlsView: View {
     let functions: [PlayerFunction]
     let orientationMode: ScreenOrientationMode
     let isZoomed: Bool
-    let activeDragIndex: Int?      // 正在拖曳的小圓（放大強調）
+    let activeRef: CircleRef?
+
+    // 第二層
+    let submenuToggles: [QuickToggle]
+    let submenuGeometry: ArcGeometry?
+    let toggleOn: (QuickToggle) -> Bool
+
     let onClose: () -> Void
+    let onMore: () -> Void
 
     @State private var scrubValue: Double = 0
     @State private var isScrubbing = false
 
-    private var primaryIndex: Int? { functions.firstIndex(of: .playPause) }
+    private let circleSize: CGFloat = 50
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            // 半圓視覺（不吃觸控）
             arcVisuals
                 .allowsHitTesting(false)
 
-            // 頂列 + 進度條（可互動）
             VStack(spacing: 8) {
                 topBar
                 progressBar
@@ -55,6 +60,11 @@ struct PlayerControlsView: View {
             }
             if controller.isBuffering {
                 ProgressView().tint(.white)
+            }
+            Button(action: onMore) {
+                Image(systemName: "ellipsis")
+                    .font(.title3.weight(.semibold))
+                    .frame(width: 44, height: 44)
             }
         }
         .foregroundStyle(.white)
@@ -94,49 +104,68 @@ struct PlayerControlsView: View {
 
     private var arcVisuals: some View {
         ZStack {
-            // 弧線導引虛線
             arcGuide
 
-            // 圓心小點
             Circle()
                 .fill(.white.opacity(0.18))
                 .frame(width: 12, height: 12)
                 .position(geometry.anchor)
 
-            // 功能小圓
+            // 第一層功能小圓
             ForEach(Array(functions.enumerated()), id: \.offset) { index, function in
-                circleView(for: function, isPrimary: index == primaryIndex,
-                           isActive: index == activeDragIndex)
+                firstLayerCircle(function,
+                                 isActive: activeRef == CircleRef(layer: 0, index: index))
                     .position(geometry.center(index))
+            }
+
+            // 第二層開關
+            if let sg = submenuGeometry, !submenuToggles.isEmpty {
+                ForEach(Array(submenuToggles.enumerated()), id: \.offset) { index, toggle in
+                    secondLayerCircle(toggle,
+                                      isActive: activeRef == CircleRef(layer: 1, index: index))
+                        .position(sg.center(index))
+                }
             }
         }
     }
 
-    private func circleView(for function: PlayerFunction,
-                            isPrimary: Bool,
-                            isActive: Bool) -> some View {
-        let size: CGFloat = isPrimary ? 64 : 48
-        return VStack(spacing: 3) {
+    private func firstLayerCircle(_ function: PlayerFunction, isActive: Bool) -> some View {
+        VStack(spacing: 3) {
             Image(systemName: icon(for: function))
-                .font(.system(size: isPrimary ? 26 : 20, weight: .semibold))
-            if !isPrimary {
-                Text(function.title)
-                    .font(.system(size: 8))
-                    .lineLimit(1)
-                    .fixedSize()
-            }
+                .font(.system(size: 20, weight: .semibold))
+            Text(function.title)
+                .font(.system(size: 8))
+                .lineLimit(1)
+                .fixedSize()
         }
         .foregroundStyle(.white)
-        .frame(width: size, height: size)
+        .frame(width: circleSize, height: circleSize)
         .background {
             Circle().fill(.ultraThinMaterial)
-            if isPrimary { Circle().fill(.white.opacity(0.16)) }
             if isActive { Circle().fill(.white.opacity(0.28)) }
         }
-        .overlay(
-            Circle().strokeBorder(.white.opacity(isActive ? 0.6 : 0.18),
-                                  lineWidth: isActive ? 2 : 1)
-        )
+        .overlay(Circle().strokeBorder(.white.opacity(isActive ? 0.6 : 0.18),
+                                       lineWidth: isActive ? 2 : 1))
+        .scaleEffect(isActive ? 1.15 : 1)
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isActive)
+    }
+
+    private func secondLayerCircle(_ toggle: QuickToggle, isActive: Bool) -> some View {
+        let on = toggleOn(toggle)
+        return VStack(spacing: 2) {
+            Image(systemName: toggle.icon(on: on))
+                .font(.system(size: 18, weight: .semibold))
+            Text(toggle.title)
+                .font(.system(size: 8))
+        }
+        .foregroundStyle(on ? Color.black : .white)
+        .frame(width: 46, height: 46)
+        .background {
+            Circle().fill(on ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.ultraThinMaterial))
+            if isActive { Circle().fill(.white.opacity(0.25)) }
+        }
+        .overlay(Circle().strokeBorder(.white.opacity(isActive ? 0.7 : 0.3),
+                                       lineWidth: isActive ? 2 : 1))
         .scaleEffect(isActive ? 1.15 : 1)
         .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isActive)
     }

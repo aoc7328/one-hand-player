@@ -99,6 +99,39 @@ final class VLCPlayerController: NSObject, ObservableObject {
         }
     }
 
+    /// 逐格步進。前進用 libVLC 的精準 `nextFrame()`；後退 libVLC 無原生支援，
+    /// 以「往回跳約一格時間」近似（預設 1/30 秒）。兩者都會先暫停。
+    func stepFrame(forward: Bool) {
+        pause()
+        if forward {
+            player.nextFrame()
+        } else {
+            let frameDuration = 1.0 / 30.0
+            seek(to: max(currentTime - frameDuration, 0))
+        }
+        Haptics.light()
+    }
+
+    private var volumeBeforeMute = 100
+
+    /// 靜音 / 取消靜音（以音量保存還原，避免依賴不同版本的 isMuted API）。
+    func setMuted(_ muted: Bool) {
+        if muted {
+            volumeBeforeMute = max(volume, 1)
+            setVolume(0)
+        } else {
+            setVolume(volumeBeforeMute)
+        }
+    }
+
+    /// 從頭重播（循環播放用）。
+    func replay() {
+        didFinish = false
+        player.stop()
+        player.play()
+        isPlaying = true
+    }
+
     /// 絕對跳轉到某秒數（拖曳進度條用）。
     func seek(to seconds: Double) {
         guard duration > 0 else { return }

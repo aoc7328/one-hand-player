@@ -3,12 +3,13 @@ import UIKit
 
 /// 全螢幕播放畫面。
 ///
-/// 互動核心（達文西調色盤式拇指面板）：
-/// - 半圓上可自訂的功能小圓；點一下 = tap 功能，按住 2D 滑動 = drag 功能
-///   （音量·亮度：上下音量、左右亮度；跳轉·速度：左右跳轉、上下速度）
-/// - 半圓區雙擊 = 影片放大 / 縮回
-/// - 半圓區空白拖曳（放大後）= 平移可視範圍
-/// - 方向鎖 = 自動 / 鎖橫 / 鎖直循環
+/// 互動框架（可擴充的多模式拇指面板）：
+/// - 半圓平時隱藏，點畫面任一處開啟；4 秒無操作自動收起
+/// - 第一層 5 顆小圓（上方好按放常用、下方放方向鎖）
+/// - `tap` 功能：點一下；`drag2D`：按住上下左右調兩個參數
+/// - `tapFlick`（播放/暫停）：點＝播放暫停；按住往右/左撥＝前進/後退一幀（看方向不看距離）
+/// - `submenu`（快捷開關）：按住約 1 秒（或點一下）展開第二層；第二層往上滑＝開、往下＝關
+/// - 半圓區雙擊＝縮放；放大後半圓空白拖曳＝平移
 struct PlayerView: View {
     let item: MediaItem
     @EnvironmentObject private var library: LibraryStore
@@ -19,20 +20,22 @@ struct PlayerView: View {
     @AppStorage("playerHandedness") private var handednessRaw = "right"
     @AppStorage(ArcConfig.storageKey) private var arcRaw = ArcConfig.defaultRaw
 
-    @State private var controlsVisible = true
+    @State private var controlsVisible = false          // 平時隱藏
     @State private var isLocked = false
     @State private var hud: GestureHUD.Style?
-    @State private var activeDragIndex: Int?
+    @State private var activeRef: CircleRef?
+
+    // 第二層
+    @State private var openSubmenu: PlayerFunction?
+    @State private var loopEnabled = false
+    @State private var muteEnabled = false
 
     // 影片縮放 / 平移
     @State private var zoomScale: CGFloat = 1
     @State private var panOffset: CGSize = .zero
     @State private var panStart: CGSize = .zero
 
-    // 方向
     @State private var orientationMode: ScreenOrientationMode = .auto
-
-    // 量測畫面尺寸供手勢換算
     @State private var playerSize: CGSize = .zero
 
     // 拖曳起始值
@@ -41,6 +44,7 @@ struct PlayerView: View {
     @State private var dragStartTime: Double = 0
     @State private var dragStartRate: Float = 1
     @State private var seekTarget: Double = 0
+    @State private var flickStepX: CGFloat = 0           // 逐格撥動基準
 
     // 面板
     @State private var showMore = false
@@ -51,14 +55,16 @@ struct PlayerView: View {
     @State private var hideHUDTask: Task<Void, Never>?
 
     private let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+    private let submenuToggleList: [QuickToggle] = [.loop, .mute, .lock]
 
     private var functions: [PlayerFunction] { ArcConfig.decode(arcRaw) }
     private var isLeftHanded: Bool { handednessRaw == "left" }
-    private var primaryIndex: Int? { functions.firstIndex(of: .playPause) }
 
     var body: some View {
         GeometryReader { geo in
             let geom = ArcGeometry(size: geo.size, isLeftHanded: isLeftHanded, count: functions.count)
+            let subGeom = ArcGeometry(size: geo.size, isLeftHanded: isLeftHanded,
+                                      count: submenuToggleList.count, extraRadius: 86)
 
             ZStack {
                 Color.black.ignoresSafeArea()
@@ -69,9 +75,8 @@ struct PlayerView: View {
                     .ignoresSafeArea()
                     .clipped()
 
-                // 手勢層（在視覺層之下，但視覺層的半圓不吃觸控，所以命中落在這裡）
                 PlayerGestureView(
-                    circles: hitCircles(geom),
+                    circles: hitCircles(geom: geom, subGeom: subGeom),
                     anchor: geom.anchor,
                     regionRadius: geom.regionRadius,
                     controlsVisible: controlsVisible,
@@ -89,16 +94,18 @@ struct PlayerView: View {
                         functions: functions,
                         orientationMode: orientationMode,
                         isZoomed: zoomScale > 1,
-                        activeDragIndex: activeDragIndex,
-                        onClose: close
+                        activeRef: activeRef,
+                        submenuToggles: openSubmenu != nil ? submenuToggleList : [],
+                        submenuGeometry: openSubmenu != nil ? subGeom : nil,
+                        toggleOn: toggleOn,
+                        onClose: close,
+                        onMore: { showMore = true }
                     )
                 }
 
                 if isLocked { lockedOverlay }
 
-                if let hud {
-                    GestureHUD(style: hud).transition(.opacity)
-                }
+                if let hud { GestureHUD(style: hud).transition(.opacity) }
             }
             .onAppear { playerSize = geo.size }
             .onChange(of: geo.size) { playerSize = $0 }
@@ -107,9 +114,12 @@ struct PlayerView: View {
         .onAppear(perform: start)
         .onDisappear {
             controller.teardown()
-            OrientationLock.apply(.auto)   // 離開時釋放方向鎖
+            OrientationLock.apply(.auto)
         }
-        .onChange(of: controller.didFinish) { if $0 { close() } }
+        .onChange(of: controller.didFinish) { finished in
+            guard finished else { return }
+            if loopEnabled { controller.replay() } else { close() }
+        }
         .sheet(isPresented: $showMore) {
             PlayerMoreSheet(controller: controller, orientationMode: $orientationMode)
         }
@@ -130,14 +140,18 @@ struct PlayerView: View {
 
     // MARK: - 命中圓
 
-    private func hitCircles(_ geom: ArcGeometry) -> [PlayerGestureView.HitCircle] {
-        functions.indices.map { i in
-            PlayerGestureView.HitCircle(
-                index: i,
-                center: geom.center(i),
-                radius: i == primaryIndex ? 42 : 34
-            )
+    private func hitCircles(geom: ArcGeometry, subGeom: ArcGeometry) -> [PlayerGestureView.HitCircle] {
+        var result = functions.indices.map { i in
+            PlayerGestureView.HitCircle(ref: CircleRef(layer: 0, index: i),
+                                        center: geom.center(i), radius: 36)
         }
+        if openSubmenu != nil {
+            result += submenuToggleList.indices.map { i in
+                PlayerGestureView.HitCircle(ref: CircleRef(layer: 1, index: i),
+                                            center: subGeom.center(i), radius: 32)
+            }
+        }
+        return result
     }
 
     // MARK: - 生命週期
@@ -149,7 +163,6 @@ struct PlayerView: View {
         }
         dragStartVolume = controller.volume
         OrientationLock.apply(orientationMode)
-        scheduleHideControls()
     }
 
     private func close() {
@@ -163,21 +176,57 @@ struct PlayerView: View {
     private func handle(_ event: PlayerGestureEvent) {
         switch event {
         case .toggleControls:
-            toggleControls()
-        case .tapCircle(let i):
-            guard functions.indices.contains(i) else { return }
-            tapFunction(functions[i])
-        case .circleDragBegan(let i):
-            guard functions.indices.contains(i) else { return }
-            activeDragIndex = i
-            beginDrag(functions[i])
-        case .circleDragChanged(let i, let t, let size):
-            guard functions.indices.contains(i) else { return }
-            updateDrag(functions[i], translation: t, viewSize: size)
-        case .circleDragEnded(let i):
-            if functions.indices.contains(i) { endDrag(functions[i]) }
-            activeDragIndex = nil
+            if openSubmenu != nil {
+                withAnimation { openSubmenu = nil }
+            } else {
+                toggleControls()
+            }
+
+        case .tapCircle(let ref):
+            if ref.layer == 0, functions.indices.contains(ref.index) {
+                tapFunction(functions[ref.index])
+            } else if ref.layer == 1, submenuToggleList.indices.contains(ref.index) {
+                flipToggle(submenuToggleList[ref.index])
+            }
+
+        case .longPressCircle(let ref):
+            if ref.layer == 0, functions.indices.contains(ref.index),
+               functions[ref.index].interaction == .submenu {
+                openSubmenuFor(functions[ref.index])
+            }
+
+        case .circleDragBegan(let ref):
+            activeRef = ref
+            hideControlsTask?.cancel()
+            if ref.layer == 0, functions.indices.contains(ref.index) {
+                switch functions[ref.index].interaction {
+                case .drag2D:  beginDrag(functions[ref.index])
+                case .tapFlick: flickStepX = 0
+                default: break
+                }
+            }
+
+        case .circleDragChanged(let ref, let t, let size):
+            if ref.layer == 0, functions.indices.contains(ref.index) {
+                switch functions[ref.index].interaction {
+                case .drag2D:   updateDrag(functions[ref.index], translation: t, viewSize: size)
+                case .tapFlick: handleFlick(t)
+                default: break
+                }
+            }
+
+        case .circleDragEnded(let ref, let t):
+            if ref.layer == 0, functions.indices.contains(ref.index) {
+                if case .drag2D = functions[ref.index].interaction { endDrag(functions[ref.index]) }
+            } else if ref.layer == 1, submenuToggleList.indices.contains(ref.index) {
+                let tg = submenuToggleList[ref.index]
+                if t.height < -18 { setToggle(tg, true) }
+                else if t.height > 18 { setToggle(tg, false) }
+                else { flipToggle(tg) }
+            }
+            activeRef = nil
             scheduleHideControls()
+
         case .regionDoubleTap:
             toggleZoom()
         case .regionPanBegan:
@@ -193,32 +242,39 @@ struct PlayerView: View {
 
     private func tapFunction(_ f: PlayerFunction) {
         switch f {
-        case .playPause:
-            controller.togglePlayPause(); Haptics.rigid()
-        case .zoom:
-            toggleZoom()
-        case .orientation:
-            cycleOrientation()
-        case .lock:
-            withAnimation { isLocked = true }; Haptics.selection()
-        case .subtitleAudio:
-            showTracksDialog = true
-        case .speed:
-            showSpeedDialog = true
-        case .handedness:
-            toggleHandedness()
-        case .more:
-            showMore = true
-        case .volumeBrightness, .seekSpeed:
-            break // 純拖曳型
+        case .playPause:     controller.togglePlayPause(); Haptics.rigid()
+        case .zoom:          toggleZoom()
+        case .orientation:   cycleOrientation()
+        case .lock:          lock()
+        case .toggles:       openSubmenuFor(.toggles)
+        case .subtitleAudio: showTracksDialog = true
+        case .speed:         showSpeedDialog = true
+        case .handedness:    toggleHandedness()
+        case .more:          showMore = true
+        case .volumeBrightness, .seekSpeed: break
         }
         if controlsVisible { scheduleHideControls() }
     }
 
-    // MARK: - 2D 拖曳功能
+    // MARK: - 逐格撥動（tapFlick）
+
+    private func handleFlick(_ t: CGSize) {
+        let threshold: CGFloat = 26
+        while t.width - flickStepX > threshold {
+            controller.stepFrame(forward: true)
+            flickStepX += threshold
+            showHUD(.info(icon: "forward.frame.fill", text: "逐格 ▶"), autoDismiss: true)
+        }
+        while t.width - flickStepX < -threshold {
+            controller.stepFrame(forward: false)
+            flickStepX -= threshold
+            showHUD(.info(icon: "backward.frame.fill", text: "◀ 逐格"), autoDismiss: true)
+        }
+    }
+
+    // MARK: - 2D 拖曳功能（drag2D）
 
     private func beginDrag(_ f: PlayerFunction) {
-        hideControlsTask?.cancel()
         switch f {
         case .volumeBrightness:
             dragStartVolume = controller.volume
@@ -277,6 +333,38 @@ struct PlayerView: View {
         dismissHUDSoon()
     }
 
+    // MARK: - 第二層開關
+
+    private func openSubmenuFor(_ f: PlayerFunction) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { openSubmenu = f }
+        Haptics.selection()
+        scheduleHideControls()
+    }
+
+    private func toggleOn(_ t: QuickToggle) -> Bool {
+        switch t {
+        case .loop: return loopEnabled
+        case .mute: return muteEnabled
+        case .lock: return isLocked
+        }
+    }
+
+    private func setToggle(_ t: QuickToggle, _ on: Bool) {
+        switch t {
+        case .loop: loopEnabled = on
+        case .mute: muteEnabled = on; controller.setMuted(on)
+        case .lock: if on { lock() } else { isLocked = false }
+        }
+        Haptics.selection()
+    }
+
+    private func flipToggle(_ t: QuickToggle) { setToggle(t, !toggleOn(t)) }
+
+    private func lock() {
+        withAnimation { isLocked = true; openSubmenu = nil }
+        Haptics.selection()
+    }
+
     // MARK: - 縮放 / 平移
 
     private func toggleZoom() {
@@ -321,14 +409,16 @@ struct PlayerView: View {
 
     private func toggleControls() {
         withAnimation { controlsVisible.toggle() }
-        if controlsVisible { scheduleHideControls() }
+        if controlsVisible { scheduleHideControls() } else { openSubmenu = nil }
     }
 
     private func scheduleHideControls() {
         hideControlsTask?.cancel()
         hideControlsTask = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
-            if !Task.isCancelled { withAnimation { controlsVisible = false } }
+            if !Task.isCancelled {
+                withAnimation { controlsVisible = false; openSubmenu = nil }
+            }
         }
     }
 
