@@ -10,8 +10,8 @@ platform :ios, '15.0'
 target 'OneHandPlayer' do
   use_frameworks!
 
-  # MobileVLCKit 3.x 穩定版；想要更小體積可改用 MobileVLCKit 的精簡建置。
-  pod 'MobileVLCKit', '~> 3.6.0'
+  # MobileVLCKit 3.x 穩定版；~> 3.3 取 3.x 最新，API 與本專案相容。
+  pod 'MobileVLCKit', '~> 3.3'
 end
 
 post_install do |installer|
